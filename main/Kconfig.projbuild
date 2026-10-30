@@ -1,0 +1,42 @@
+menu "LCD UI Designer"
+
+    config APP_WIFI_SSID
+        string "Default WiFi SSID"
+        default ""
+        help
+            Network to join on first boot. Leave empty to start the setup access
+            point instead; the network can then be chosen in the web editor.
+
+    config APP_WIFI_PASSWORD
+        string "Default WiFi password"
+        default ""
+
+    config APP_HOSTNAME
+        string "Hostname"
+        default "lcd-ui"
+        help
+            The editor is reachable at http://<hostname>.local via mDNS.
+
+    config APP_AP_PASSWORD
+        string "Setup access point password"
+        default "lcdsetup"
+        help
+            WPA2 password of the "LCD-UI-XXXX" setup access point (8+ characters,
+            shorter makes the access point open).
+
+    config APP_LCD_PCLK_MHZ
+        int "RGB pixel clock (MHz)"
+        default 16
+        range 8 24
+        help
+            Lower this if the image flickers or drifts when WiFi is busy.
+
+    config APP_LCD_BOUNCE_LINES
+        int "Bounce buffer height in lines (0 = disabled)"
+        default 10
+        range 0 40
+        help
+            Bounce buffers in internal RAM keep the panel stable while PSRAM is
+            busy. Must divide the panel height (480) evenly.
+
+endmenu

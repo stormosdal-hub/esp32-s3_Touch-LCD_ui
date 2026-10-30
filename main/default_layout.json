@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "name": "Demo",
+  "settings": {
+    "theme": "dark",
+    "primary": "#2196F3",
+    "secondary": "#FF9800",
+    "tabbar": "top",
+    "tabbar_size": 50,
+    "swipe": false,
+    "screensaver_s": 0,
+    "ws_signals": true,
+    "ws_events": true,
+    "timezone": "CET-1CEST,M3.5.0,M10.5.0/3"
+  },
+  "ports": {
+    "rs485": { "enabled": true, "baud": 9600, "parity": "none", "stop_bits": 1, "mode": "raw", "timeout_ms": 200, "idle_ms": 100 },
+    "can": { "enabled": false, "bitrate": 500000, "log_raw": false },
+    "mqtt": { "enabled": false, "uri": "mqtt://192.168.1.10", "username": "", "password": "", "client_id": "", "publish_prefix": "" }
+  },
+  "signals": [
+    { "name": "demo.level", "value": 40 },
+    { "name": "demo.led", "value": 0 },
+    { "name": "demo.mode", "value": 0 },
+    { "name": "demo.alarm", "value": 1 }
+  ],
+  "tabs": [
+    {
+      "id": "home",
+      "title": "Home",
+      "widgets": [
+        { "id": "title", "type": "label", "x": 20, "y": 14, "w": 520, "h": 40, "text": "ESP32-S3 Touch LCD 7 - UI Designer", "font": 24 },
+        { "id": "clock", "type": "label", "x": 560, "y": 8, "w": 220, "h": 56, "text": "--:--:--", "signal": "sys.time", "font": 40, "align": "right" },
+        { "id": "date", "type": "label", "x": 560, "y": 64, "w": 220, "h": 24, "text": "", "signal": "sys.date", "font": 16, "align": "right", "fg": "#90A4AE" },
+        { "id": "wifi", "type": "label", "x": 20, "y": 66, "w": 520, "h": 50, "text": "Starting WiFi...", "signal": "sys.wifi", "font": 16, "fg": "#4FC3F7" },
+        { "id": "help", "type": "label", "x": 20, "y": 126, "w": 520, "h": 160, "font": 18,
+          "text": "Open the address above in a browser to edit this screen. Add tabs, buttons, sliders, charts and logs, bind them to signals, attach actions, then press Deploy." },
+        { "id": "led_panel", "type": "panel", "x": 560, "y": 120, "w": 220, "h": 170, "text": "Demo LED", "bg": "#263238", "radius": 12, "border_width": 0 },
+        { "id": "led1", "type": "led", "x": 600, "y": 185, "w": 50, "h": 50, "signal": "demo.led", "accent": "#4CAF50" },
+        { "id": "sw1", "type": "switch", "x": 680, "y": 192, "w": 76, "h": 38, "signal": "demo.led" },
+        { "id": "btn_hello", "type": "button", "x": 20, "y": 320, "w": 230, "h": 80, "text": "Say hello", "font": 22,
+          "events": [ { "on": "clicked", "actions": [
+            { "type": "ws_send", "payload": "{\"hello\":\"from {id}\"}" },
+            { "type": "log", "text": "Hello button pressed" } ] } ] },
+        { "id": "btn_toggle", "type": "button", "x": 280, "y": 320, "w": 230, "h": 80, "text": "Toggle LED", "font": 22, "bg": "#455A64",
+          "events": [ { "on": "clicked", "actions": [ { "type": "set_signal", "signal": "demo.led", "mode": "toggle" } ] } ] },
+        { "id": "btn_next", "type": "button", "x": 560, "y": 320, "w": 220, "h": 80, "text": "Controls " , "font": 22, "bg": "#FF9800",
+          "events": [ { "on": "clicked", "actions": [ { "type": "tab", "tab": "controls" } ] } ] }
+      ]
+    },
+    {
+      "id": "controls",
+      "title": "Controls",
+      "widgets": [
+        { "id": "lbl_level", "type": "label", "x": 20, "y": 16, "w": 460, "h": 30, "text": "Level: --", "signal": "demo.level", "format": "Level: %.0f %%", "font": 20 },
+        { "id": "level_slider", "type": "slider", "x": 30, "y": 68, "w": 440, "h": 18, "signal": "demo.level", "min": 0, "max": 100,
+          "events": [ { "on": "released", "actions": [ { "type": "log", "text": "Level set to {value}" } ] } ] },
+        { "id": "level_bar", "type": "bar", "x": 20, "y": 116, "w": 460, "h": 30, "signal": "demo.level", "min": 0, "max": 100, "show_value": true, "accent": "#4CAF50" },
+        { "id": "level_arc", "type": "arc", "x": 530, "y": 16, "w": 230, "h": 230, "signal": "demo.level", "min": 0, "max": 100, "thickness": 18, "font": 32, "format": "%.0f" },
+        { "id": "mode", "type": "dropdown", "x": 20, "y": 176, "w": 220, "h": 46, "options": "Auto\nManual\nOff", "signal": "demo.mode",
+          "events": [ { "on": "changed", "actions": [ { "type": "log", "text": "Mode: {text}" } ] } ] },
+        { "id": "alarm", "type": "checkbox", "x": 270, "y": 184, "w": 210, "h": 36, "text": "Alarm enabled", "signal": "demo.alarm" },
+        { "id": "cmd", "type": "input", "x": 20, "y": 252, "w": 460, "h": 50, "text": "Command to send on RS-485...",
+          "events": [ { "on": "submit", "actions": [
+            { "type": "serial_send", "port": "rs485", "data": "{value}", "append": "crlf" },
+            { "type": "log", "text": "Sent: {value}" } ] } ] },
+        { "id": "btn_home", "type": "button", "x": 20, "y": 330, "w": 200, "h": 70, "text": "Home", "font": 20,
+          "events": [ { "on": "clicked", "actions": [ { "type": "tab", "tab": "home" } ] } ] }
+      ]
+    },
+    {
+      "id": "monitor",
+      "title": "Monitor",
+      "widgets": [
+        { "id": "chart1", "type": "chart", "x": 10, "y": 10, "w": 530, "h": 250, "min": 0, "max": 100, "points": 60, "sample_ms": 1000,
+          "series": [ { "signal": "demo.level", "color": "#2196F3" } ] },
+        { "id": "rssi", "type": "gauge", "x": 570, "y": 10, "w": 210, "h": 210, "signal": "sys.rssi", "min": -100, "max": -30, "format": "%.0f dBm", "font": 20, "thickness": 14 },
+        { "id": "heap", "type": "label", "x": 570, "y": 230, "w": 210, "h": 26, "signal": "sys.heap", "format": "Free RAM: %.0f kB", "font": 14, "align": "center" },
+        { "id": "log1", "type": "log", "x": 10, "y": 272, "w": 770, "h": 148, "signals": "*", "max_lines": 50, "font": 14 }
+      ]
+    }
+  ],
+  "inputs": [
+    { "id": "adc6", "type": "adc", "enabled": false, "pin": 6, "signal": "sensor.mv", "mode": "mv", "period_ms": 500, "scale": 1, "offset": 0 }
+  ],
+  "rules": [
+    { "id": "level_high", "signal": "demo.level", "op": ">", "value": 80,
+      "actions": [ { "type": "log", "text": "Level is high: {value}" } ] }
+  ]
+}
