@@ -177,8 +177,9 @@ CJSON_DIR=/path/to/cJSON test/host/run.sh
 * The built-in fonts cover ASCII plus `°`; for æ, ø, å or other characters,
   generate a Montserrat subset with LVGL's font converter and add it to
   `font_for()` in `ui_engine.c`.
-* No authentication on the editor or API yet. A password in settings with HTTP
-  Basic auth would be a small addition.
+* No password on the editor or API yet (cross-site requests from other web
+  pages are blocked, but anyone on your network can open the editor). A
+  password with HTTP Basic auth would be a small addition.
 * Possible next steps: images and icons uploaded to LittleFS, conditional
   visibility (show a widget only when a signal matches), multi-select in the
   editor, data logging to the TF card, an RS-485 / Modbus slave mode, and

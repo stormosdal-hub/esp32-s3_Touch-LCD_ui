@@ -12,6 +12,9 @@ esp_err_t net_init(void);
 /* Change the station network (saved in NVS) and reconnect. hostname may be NULL. */
 esp_err_t net_set_sta(const char *ssid, const char *password, const char *hostname);
 
+/* Configured hostname (mDNS name without ".local"). */
+const char *net_hostname(void);
+
 /* POSIX TZ string, e.g. "CET-1CEST,M3.5.0,M10.5.0/3". */
 void net_set_timezone(const char *tz);
 

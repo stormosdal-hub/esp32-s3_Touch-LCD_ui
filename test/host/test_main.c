@@ -47,7 +47,9 @@ int main(void)
     char b[32];
     util_num_to_str(40, b, sizeof(b)); CHECK_STR(b, "40");
     util_num_to_str(-3.25, b, sizeof(b)); CHECK_STR(b, "-3.25");
-    util_num_to_str(1.0 / 3, b, sizeof(b)); CHECK_STR(b, "0.333333");
+    util_num_to_str(1.0 / 3, b, sizeof(b)); CHECK_STR(b, "0.3333333333");
+    util_num_to_str(1234567.8, b, sizeof(b)); CHECK_STR(b, "1234567.8");
+    util_num_to_str(0.1 + 0.2, b, sizeof(b)); CHECK_STR(b, "0.3");
 
     /* util_parse_hex */
     uint8_t hx[8];
@@ -81,6 +83,16 @@ int main(void)
     uint32_t crc = util_crc16_modbus(req, 6);
     CHECK((crc & 0xFF) == 0x84 && (crc >> 8) == 0x0A);
 
+    /* util_json_parse: depth limit */
+    char deep[200];
+    memset(deep, '[', 100);
+    memset(deep + 100, ']', 100);
+    CHECK(util_json_parse(deep, sizeof(deep)) == NULL);
+    const char *ok_json = "{\"a\":[1,{\"b\":\"[[[[[[[[[[[[[[[[[[[[[[[[[[[[[\"}]}";
+    cJSON *pj = util_json_parse(ok_json, strlen(ok_json));
+    CHECK(pj != NULL);
+    cJSON_Delete(pj);
+
     /* io_decode */
     const uint8_t be[] = { 0xFF, 0x38, 0x41, 0x48, 0x00, 0x00 };
     CHECK(io_decode(be, 2, "s16", &v) && v == -200);
@@ -105,6 +117,9 @@ int main(void)
     CHECK(!sig_is_text(sig_index("num_as_text", false)));
     CHECK(sig_get_num(sig_index("onoff", false), &v) && v == 1);
     CHECK(sig_index("missing", false) == -1);
+    sig_set_text_remote("remote.x", "5");
+    CHECK(sig_index("remote.x", false) >= 0);
+    CHECK(sig_count() == 5);
 
     /* templates */
     sig_set_num("level", 7, false);

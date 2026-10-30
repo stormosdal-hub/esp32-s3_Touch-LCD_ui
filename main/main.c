@@ -21,6 +21,7 @@
 #include "freertos/task.h"
 #include "io_manager.h"
 #include "net.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "signals.h"
 #include "storage.h"
@@ -33,6 +34,35 @@ static const char *TAG = "main";
 extern const char default_layout_start[] asm("_binary_default_layout_json_start");
 
 static SemaphoreHandle_t s_apply_lock;
+
+/*
+ * Crash guard: a counter in NVS is raised before a layout is applied and
+ * cleared once it is running. If the device reboots in between, the next boot
+ * falls back to the previous layout, then to the built-in one.
+ */
+#define NVS_APP      "app"
+#define NVS_ATTEMPTS "apply_try"
+
+static uint8_t apply_attempts(void)
+{
+    uint8_t v = 0;
+    nvs_handle_t h;
+    if (nvs_open(NVS_APP, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, NVS_ATTEMPTS, &v);
+        nvs_close(h);
+    }
+    return v;
+}
+
+static void set_apply_attempts(uint8_t v)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_APP, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, NVS_ATTEMPTS, v);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
 
 const char *app_default_layout(void)
 {
@@ -52,7 +82,7 @@ static void apply_root(cJSON *root)
 
 static cJSON *parse_layout(const char *json, size_t len, char *err, size_t errlen)
 {
-    cJSON *root = cJSON_ParseWithLength(json, len);
+    cJSON *root = util_json_parse(json, len);
     if (!cJSON_IsObject(root)) {
         const char *at = cJSON_GetErrorPtr();
         snprintf(err, errlen, "invalid JSON%s%.40s", at ? " near: " : "", at ? at : "");
@@ -89,7 +119,13 @@ esp_err_t app_apply_json(const char *json, size_t len, bool persist, char *err, 
             return ESP_FAIL;
         }
     }
+    if (persist) {
+        set_apply_attempts(1);    /* if this crashes, the next boot uses the backup */
+    }
     apply_root(root);
+    if (persist) {
+        set_apply_attempts(0);
+    }
     xSemaphoreGive(s_apply_lock);
     ESP_LOGI(TAG, "layout applied (%u bytes%s)", (unsigned)len, persist ? ", saved" : "");
     return ESP_OK;
@@ -165,8 +201,24 @@ void app_main(void)
     io_manager_init();
     net_init();     /* before the layout: MQTT and HTTP actions need the network stack */
 
+    /* Load the stored layout, unless applying it crashed last time. */
+    uint8_t attempts = apply_attempts();
     size_t len = 0;
-    char *json = storage_read(APP_LAYOUT_PATH, &len);
+    char *json = NULL;
+    if (attempts == 0) {
+        json = storage_read(APP_LAYOUT_PATH, &len);
+    } else if (attempts == 1) {
+        ESP_LOGE(TAG, "the last layout crashed the device; restoring the previous one");
+        json = storage_read(APP_BACKUP_PATH, &len);
+        if (json) {
+            rename(APP_LAYOUT_PATH, "/data/layout.crashed.json");
+            storage_write(APP_LAYOUT_PATH, json, len);
+        }
+    } else {
+        ESP_LOGE(TAG, "stored layouts keep crashing; starting with the built-in layout");
+        rename(APP_LAYOUT_PATH, "/data/layout.crashed.json");
+    }
+    set_apply_attempts(attempts < 255 ? attempts + 1 : 255);
     char msg[128] = "";
     if (!json || app_apply_json(json, len, false, msg, sizeof(msg)) != ESP_OK) {
         if (json) {
@@ -175,6 +227,7 @@ void app_main(void)
         app_apply_json(app_default_layout(), strlen(app_default_layout()), false, msg, sizeof(msg));
     }
     free(json);
+    set_apply_attempts(0);
 
     vTaskDelay(pdMS_TO_TICKS(100));    /* let LVGL draw the first frame before lighting up */
     board_backlight_set(true);

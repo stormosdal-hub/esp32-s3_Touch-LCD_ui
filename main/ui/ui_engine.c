@@ -38,6 +38,7 @@ typedef struct {
     size_t len, cap;
     int lines, max_lines;
     bool newest_first;
+    bool dirty;                  /* text changed since the label was last updated */
     const char *filter;          /* "*", list of signal names, or "" */
 } logbuf_t;
 
@@ -55,7 +56,8 @@ typedef struct {
     lv_chart_series_t *ser[MAX_SERIES];
     int ser_sig[MAX_SERIES];
     int nser;
-    lv_timer_t *timer;
+    lv_timer_t *timer;           /* chart sampling, or delayed release of a momentary button */
+    uint32_t press_tick;
     /* log */
     logbuf_t *log;
 } widget_t;
@@ -228,11 +230,25 @@ static void log_append(widget_t *w, const char *text)
     }
     lb->len += el;
     lb->lines++;
-    lb->buf[lb->len - 1] = '\0';         /* hide trailing newline */
-    lv_label_set_text(w->label, lb->buf);
-    lb->buf[lb->len - 1] = '\n';
     lb->buf[lb->len] = '\0';
+    lb->dirty = true;
+}
 
+/* Push pending log text to the label (once per tick, however many lines arrived). */
+static void log_flush(widget_t *w)
+{
+    logbuf_t *lb = w->log;
+    if (!lb->dirty) {
+        return;
+    }
+    lb->dirty = false;
+    if (lb->len) {
+        lb->buf[lb->len - 1] = '\0';     /* hide trailing newline */
+    }
+    lv_label_set_text(w->label, lb->buf);
+    if (lb->len) {
+        lb->buf[lb->len - 1] = '\n';
+    }
     if (!lb->newest_first) {
         lv_obj_update_layout(w->obj);
         lv_obj_scroll_to_y(w->obj, lv_obj_get_scroll_y(w->obj) + lv_obj_get_scroll_bottom(w->obj), LV_ANIM_OFF);
@@ -267,8 +283,8 @@ static void chart_timer_cb(lv_timer_t *t)
     chart_push(lv_timer_get_user_data(t), -1);
 }
 
-/* Push the bound signal's current value into a widget. */
-static void widget_update(widget_t *w)
+/* Push the bound signal's current value into a widget (skipped while the user drags it unless forced). */
+static void widget_update_ex(widget_t *w, bool force)
 {
     if (w->sig < 0 || w->type == W_CHART || w->type == W_LOG) {
         return;
@@ -280,7 +296,7 @@ static void widget_update(widget_t *w)
     char txt[128];
     sig_get_text(w->sig, txt, sizeof(txt));
     bool is_text = sig_is_text(w->sig);
-    bool busy = lv_obj_has_state(w->obj, LV_STATE_PRESSED);
+    bool busy = !force && lv_obj_has_state(w->obj, LV_STATE_PRESSED);
     char out[192];
 
     switch (w->type) {
@@ -360,6 +376,11 @@ static void widget_update(widget_t *w)
     }
 }
 
+static void widget_update(widget_t *w)
+{
+    widget_update_ex(w, false);
+}
+
 /* ---------- Screen saver ---------- */
 
 static void wake_cb(lv_event_t *e)
@@ -436,7 +457,9 @@ static void keyboard_hide(void)
 static void keyboard_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
-    if (code == LV_EVENT_READY || code == LV_EVENT_CANCEL) {
+    /* READY (the OK key) is forwarded by LVGL to the textarea next, where
+     * event_cb submits and hides; hiding here would detach the textarea first. */
+    if (code == LV_EVENT_CANCEL) {
         lv_obj_t *ta = lv_keyboard_get_textarea(s_keyboard);
         if (ta) {
             lv_obj_remove_state(ta, LV_STATE_FOCUSED);
@@ -457,6 +480,32 @@ static void keyboard_show(widget_t *w)
     lv_keyboard_set_mode(s_keyboard, numeric ? LV_KEYBOARD_MODE_NUMBER : LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_keyboard_set_textarea(s_keyboard, w->obj);
     lv_obj_remove_flag(s_keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void release_timer_cb(lv_timer_t *t)
+{
+    widget_t *w = lv_timer_get_user_data(t);
+    sig_set_num_idx(w->sig, 0, false);
+}
+
+/*
+ * Write 0 for a released momentary button. A tap shorter than two UI ticks
+ * would otherwise be 1 and 0 within one tick, and rules/WebSocket/MQTT would
+ * never see the 1, so the 0 is delayed in that case.
+ */
+static void release_momentary(widget_t *w)
+{
+    if (lv_tick_elaps(w->press_tick) >= 2 * TICK_MS) {
+        sig_set_num_idx(w->sig, 0, false);
+        return;
+    }
+    if (!w->timer) {
+        w->timer = lv_timer_create(release_timer_cb, 2 * TICK_MS, w);
+        lv_timer_set_auto_delete(w->timer, false);
+    }
+    lv_timer_set_repeat_count(w->timer, 1);
+    lv_timer_reset(w->timer);
+    lv_timer_resume(w->timer);
 }
 
 static void event_cb(lv_event_t *e)
@@ -487,6 +536,9 @@ static void event_cb(lv_event_t *e)
     if (w->type == W_INPUT && code == LV_EVENT_VALUE_CHANGED) {
         return;     /* every keystroke; only "submit" is interesting */
     }
+    if (w->type == W_INPUT && code == LV_EVENT_CLICKED) {
+        keyboard_show(w);   /* tapping an already focused input sends no FOCUSED */
+    }
     if (w->type == W_INPUT && code == LV_EVENT_READY) {
         keyboard_hide();
         lv_obj_remove_state(w->obj, LV_STATE_FOCUSED);
@@ -500,12 +552,21 @@ static void event_cb(lv_event_t *e)
     if (w->sig >= 0) {
         const char *sname = sig_name(w->sig);
         bool momentary = w->type == W_BUTTON && !w->toggle;
-        if (momentary && (code == LV_EVENT_PRESSED || code == LV_EVENT_RELEASED)) {
-            sig_set_num(sname, v, false);
+        if (momentary && code == LV_EVENT_PRESSED) {
+            w->press_tick = lv_tick_get();
+            sig_set_num(sname, 1, false);
+        } else if (momentary && code == LV_EVENT_RELEASED) {
+            release_momentary(w);
+        } else if (w->type == W_DROPDOWN && code == LV_EVENT_VALUE_CHANGED && sig_is_text(w->sig)) {
+            sig_set_text(sname, text, false);   /* text signal: keep it text */
         } else if (!momentary && code == LV_EVENT_VALUE_CHANGED) {
             sig_set_num(sname, v, false);
         } else if (w->type == W_INPUT && code == LV_EVENT_READY) {
             sig_set_text(sname, text, true);
+        }
+        if (!momentary && code == LV_EVENT_RELEASED) {
+            /* updates that arrived while the user held the widget were skipped */
+            widget_update_ex(w, true);
         }
     }
 
@@ -1140,6 +1201,11 @@ static void tick_cb(lv_timer_t *t)
 {
     tick_ctx_t ctx = {0};
     sig_take_dirty(on_dirty, &ctx);
+    for (int i = 0; i < s_nw; i++) {
+        if (s_w[i].log) {
+            log_flush(&s_w[i]);
+        }
+    }
     if (ctx.batch) {
         cJSON *msg = cJSON_CreateObject();
         cJSON_AddItemToObject(msg, "signals", ctx.batch);

@@ -12,7 +12,9 @@
 #include "cJSON.h"
 
 #define SIG_NAME_MAX 32
-#define SIG_MAX      192
+#define SIG_MAX      512
+/* Slots that names chosen by remote peers (WebSocket, REST, serial kv/json) cannot use. */
+#define SIG_RESERVED 128
 
 void sig_init(void);
 
@@ -27,6 +29,16 @@ const char *sig_name(int idx);
 void sig_set_num(const char *name, double v, bool notify_always);
 void sig_set_text(const char *name, const char *text, bool notify_always); /* numbers are detected */
 void sig_set_num_idx(int idx, double v, bool notify_always);
+
+/*
+ * For names that come from the network or a serial peer: same as above, but a
+ * new signal is only created while more than SIG_RESERVED slots are free, so
+ * a chatty device cannot fill the table the layout needs.
+ */
+void sig_set_num_remote(const char *name, double v);
+void sig_set_text_remote(const char *name, const char *text);
+
+int sig_count(void);
 
 /* Numeric value (strings parse as numbers, "on"/"true" = 1). False if never set. */
 bool sig_get_num(int idx, double *out);

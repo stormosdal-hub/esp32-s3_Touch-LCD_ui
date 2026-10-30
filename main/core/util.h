@@ -25,7 +25,7 @@ bool util_parse_color(const char *s, uint32_t *rgb);
  */
 void util_format_value(const char *fmt, double num, const char *text, char *out, size_t len);
 
-/* Format a number compactly (integers without decimals, otherwise up to 6 significant digits). */
+/* Format a number compactly (integers without decimals, otherwise up to 10 significant digits). */
 void util_num_to_str(double v, char *out, size_t len);
 
 /* Parse "01 02 ff", "0x01,0x02" or "01:02" into bytes. Returns count or -1 on error. */
@@ -38,3 +38,10 @@ size_t util_unescape(char *s);
 bool util_parse_number(const char *s, double *out, bool allow_words);
 
 uint32_t util_crc16_modbus(const uint8_t *data, size_t len);
+
+/*
+ * cJSON_ParseWithLength() for untrusted input: rejects documents nested deeper
+ * than UTIL_JSON_MAX_DEPTH, since cJSON recurses per level and tasks have small stacks.
+ */
+#define UTIL_JSON_MAX_DEPTH 24
+cJSON *util_json_parse(const char *s, size_t len);

@@ -16,6 +16,9 @@
 
 static const char *TAG = "can";
 
+#define TX_QUEUE_DEPTH 8
+#define TX_SLOTS       (TX_QUEUE_DEPTH + 2)   /* queued + in flight + spare */
+
 typedef struct {
     uint32_t id;
     bool ext;
@@ -23,12 +26,24 @@ typedef struct {
     uint8_t data[8];
 } can_msg_t;
 
+/*
+ * The driver keeps a pointer to each queued frame until it has been sent, so
+ * frames live in this pool and are released from the TX-done callback.
+ */
+typedef struct {
+    twai_frame_t frame;
+    uint8_t data[8];
+    volatile bool busy;
+} tx_slot_t;
+
 static twai_node_handle_t s_node;
 static SemaphoreHandle_t s_lock;
 static QueueHandle_t s_rxq;
+static tx_slot_t s_tx[TX_SLOTS];
 static int s_bitrate;
 static bool s_log_raw;
-static uint32_t s_rx_count, s_tx_count, s_tx_err;
+static volatile bool s_bus_off;
+static volatile uint32_t s_rx_count, s_tx_count, s_tx_err;
 
 static bool on_rx(twai_node_handle_t node, const twai_rx_done_event_data_t *edata, void *ctx)
 {
@@ -45,47 +60,85 @@ static bool on_rx(twai_node_handle_t node, const twai_rx_done_event_data_t *edat
     return woken == pdTRUE;
 }
 
+static bool on_tx_done(twai_node_handle_t node, const twai_tx_done_event_data_t *edata, void *ctx)
+{
+    for (int i = 0; i < TX_SLOTS; i++) {
+        if (&s_tx[i].frame == edata->done_tx_frame) {
+            s_tx[i].busy = false;
+            break;
+        }
+    }
+    if (edata->is_tx_success) {
+        s_tx_count++;
+    } else {
+        s_tx_err++;
+    }
+    return false;
+}
+
+static bool on_state_change(twai_node_handle_t node, const twai_state_change_event_data_t *edata, void *ctx)
+{
+    if (edata->new_sta == TWAI_ERROR_BUS_OFF) {
+        s_bus_off = true;
+    }
+    return false;
+}
+
+static void dispatch(const can_msg_t *m)
+{
+    s_rx_count++;
+    if (s_log_raw) {
+        char txt[48];
+        int o = snprintf(txt, sizeof(txt), m->ext ? "%08lX#" : "%03lX#", (unsigned long)m->id);
+        for (int i = 0; i < m->len && o < (int)sizeof(txt) - 3; i++) {
+            o += snprintf(txt + o, sizeof(txt) - o, "%02X", m->data[i]);
+        }
+        sig_set_text("can.rx", txt, true);
+    }
+    io_cfg_lock();
+    int n;
+    io_input_t *in = io_inputs(&n);
+    for (int i = 0; i < n; i++) {
+        if (in[i].type != IN_CAN || in[i].can_id != m->id || in[i].ext != m->ext) {
+            continue;
+        }
+        if (!strcmp(in[i].format, "hex")) {
+            char txt[24] = "";
+            for (int b = 0; b < m->len; b++) {
+                snprintf(txt + b * 2, sizeof(txt) - b * 2, "%02X", m->data[b]);
+            }
+            sig_set_text(in[i].signal, txt, true);
+            continue;
+        }
+        double v;
+        int start = in[i].start;
+        if (start >= 0 && start < m->len && io_decode(m->data + start, m->len - start, in[i].format, &v)) {
+            io_store(&in[i], v);
+        }
+    }
+    io_cfg_unlock();
+}
+
 static void can_task(void *arg)
 {
     can_msg_t m;
     for (;;) {
-        if (xQueueReceive(s_rxq, &m, portMAX_DELAY) != pdTRUE) {
-            continue;
+        if (xQueueReceive(s_rxq, &m, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            dispatch(&m);
         }
-        s_rx_count++;
-        if (s_log_raw) {
-            char txt[48];
-            int o = snprintf(txt, sizeof(txt), m.ext ? "%08lX#" : "%03lX#", (unsigned long)m.id);
-            for (int i = 0; i < m.len && o < (int)sizeof(txt) - 3; i++) {
-                o += snprintf(txt + o, sizeof(txt) - o, "%02X", m.data[i]);
+        if (s_bus_off) {
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            if (s_node && s_bus_off) {
+                ESP_LOGW(TAG, "bus-off, recovering");
+                s_bus_off = false;
+                twai_node_recover(s_node);
             }
-            sig_set_text("can.rx", txt, true);
+            xSemaphoreGive(s_lock);
         }
-        io_cfg_lock();
-        int n;
-        io_input_t *in = io_inputs(&n);
-        for (int i = 0; i < n; i++) {
-            if (in[i].type != IN_CAN || in[i].can_id != m.id || in[i].ext != m.ext) {
-                continue;
-            }
-            if (!strcmp(in[i].format, "hex")) {
-                char txt[24] = "";
-                for (int b = 0; b < m.len; b++) {
-                    snprintf(txt + b * 2, sizeof(txt) - b * 2, "%02X", m.data[b]);
-                }
-                sig_set_text(in[i].signal, txt, true);
-                continue;
-            }
-            double v;
-            int start = in[i].start;
-            if (start >= 0 && start < m.len && io_decode(m.data + start, m.len - start, in[i].format, &v)) {
-                io_store(&in[i], v);
-            }
-        }
-        io_cfg_unlock();
     }
 }
 
+/* Caller holds s_lock. */
 static void stop_node(void)
 {
     if (s_node) {
@@ -93,6 +146,9 @@ static void stop_node(void)
         twai_node_delete(s_node);
         s_node = NULL;
         board_select_can(false);
+    }
+    for (int i = 0; i < TX_SLOTS; i++) {
+        s_tx[i].busy = false;    /* the deleted node no longer references them */
     }
 }
 
@@ -123,9 +179,14 @@ void io_can_apply(const cJSON *port)
                 .bus_off_indicator = GPIO_NUM_NC,
             },
             .bit_timing = { .bitrate = bitrate },
-            .tx_queue_depth = 8,
+            .fail_retry_cnt = 3,
+            .tx_queue_depth = TX_QUEUE_DEPTH,
         };
-        twai_event_callbacks_t cbs = { .on_rx_done = on_rx };
+        twai_event_callbacks_t cbs = {
+            .on_rx_done = on_rx,
+            .on_tx_done = on_tx_done,
+            .on_state_change = on_state_change,
+        };
         esp_err_t err = twai_new_node_onchip(&cfg, &s_node);
         if (err == ESP_OK) {
             err = twai_node_register_event_callbacks(s_node, &cbs, NULL);
@@ -142,10 +203,16 @@ void io_can_apply(const cJSON *port)
             board_select_can(false);
         } else {
             s_bitrate = bitrate;
+            s_bus_off = false;
             ESP_LOGI(TAG, "CAN running at %d bit/s", bitrate);
         }
     }
     xSemaphoreGive(s_lock);
+}
+
+bool io_can_running(void)
+{
+    return s_node != NULL;
 }
 
 esp_err_t io_can_send(uint32_t id, bool ext, const uint8_t *data, size_t len)
@@ -153,26 +220,34 @@ esp_err_t io_can_send(uint32_t id, bool ext, const uint8_t *data, size_t len)
     if (len > 8) {
         return ESP_ERR_INVALID_ARG;
     }
-    uint8_t buf[8];
-    memcpy(buf, data, len);
-    twai_frame_t f = {
-        .header = { .id = id, .ide = ext, .dlc = len },
-        .buffer = buf,
-        .buffer_len = len,
-    };
-    xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t err = ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
     if (s_node) {
-        err = twai_node_transmit(s_node, &f, 100);
-        if (err == ESP_OK) {
-            /* the frame lives on our stack, so wait until it has left */
-            err = twai_node_transmit_wait_all_done(s_node, 200);
+        tx_slot_t *slot = NULL;
+        for (int i = 0; i < TX_SLOTS && !slot; i++) {
+            if (!s_tx[i].busy) {
+                slot = &s_tx[i];
+            }
+        }
+        if (!slot) {
+            err = ESP_ERR_NO_MEM;     /* everything still queued: bus stuck or nobody acknowledges */
+        } else {
+            memcpy(slot->data, data, len);
+            memset(&slot->frame, 0, sizeof(slot->frame));
+            slot->frame.header.id = id;
+            slot->frame.header.ide = ext;
+            slot->frame.header.dlc = len;
+            slot->frame.buffer = slot->data;
+            slot->frame.buffer_len = len;
+            slot->busy = true;
+            err = twai_node_transmit(s_node, &slot->frame, 50);
+            if (err != ESP_OK) {
+                slot->busy = false;
+            }
         }
     }
     xSemaphoreGive(s_lock);
-    if (err == ESP_OK) {
-        s_tx_count++;
-    } else {
+    if (err != ESP_OK) {
         s_tx_err++;
         ESP_LOGW(TAG, "CAN send 0x%lX failed: %s", (unsigned long)id, esp_err_to_name(err));
     }

@@ -83,7 +83,7 @@ void util_num_to_str(double v, char *out, size_t len)
     if (isfinite(v) && fabs(v) < 1e15 && v == floor(v)) {
         snprintf(out, len, "%.0f", v);
     } else {
-        snprintf(out, len, "%.6g", v);
+        snprintf(out, len, "%.10g", v);
     }
 }
 
@@ -266,6 +266,34 @@ bool util_parse_number(const char *s, double *out, bool allow_words)
         }
     }
     return false;
+}
+
+cJSON *util_json_parse(const char *s, size_t len)
+{
+    if (!s) {
+        return NULL;
+    }
+    int depth = 0;
+    bool in_str = false;
+    for (size_t i = 0; i < len && s[i]; i++) {
+        char c = s[i];
+        if (in_str) {
+            if (c == '\\') {
+                i++;
+            } else if (c == '"') {
+                in_str = false;
+            }
+        } else if (c == '"') {
+            in_str = true;
+        } else if (c == '{' || c == '[') {
+            if (++depth > UTIL_JSON_MAX_DEPTH) {
+                return NULL;
+            }
+        } else if (c == '}' || c == ']') {
+            depth--;
+        }
+    }
+    return cJSON_ParseWithLength(s, len);
 }
 
 uint32_t util_crc16_modbus(const uint8_t *data, size_t len)

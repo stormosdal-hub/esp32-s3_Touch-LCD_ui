@@ -213,9 +213,10 @@ static void do_ui(const cJSON *a, const job_t *job, bool is_tab)
 
 static void do_backlight(const cJSON *a)
 {
+    /* via ui.backlight, so the UI also arms/disarms its touch-to-wake layer */
     const char *st = json_str(a, "state", "toggle");
     bool on = !strcmp(st, "on") ? true : !strcmp(st, "off") ? false : !board_backlight_get();
-    board_backlight_set(on);
+    sig_set_num("ui.backlight", on, false);
 }
 
 static void execute(const job_t *job)

@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -19,7 +20,7 @@ typedef struct {
     char *text;
 } signal_t;
 
-static signal_t s_sig[SIG_MAX];
+static signal_t *s_sig;        /* SIG_MAX entries, in PSRAM */
 static int s_count;
 static uint32_t s_dirty[(SIG_MAX + 31) / 32];
 static SemaphoreHandle_t s_lock;
@@ -30,6 +31,34 @@ static SemaphoreHandle_t s_lock;
 void sig_init(void)
 {
     s_lock = xSemaphoreCreateMutex();
+    s_sig = heap_caps_calloc(SIG_MAX, sizeof(signal_t), MALLOC_CAP_SPIRAM);
+    if (!s_sig) {
+        s_sig = calloc(SIG_MAX, sizeof(signal_t));
+    }
+}
+
+int sig_count(void)
+{
+    return s_count;
+}
+
+static bool remote_may_create(const char *name)
+{
+    return sig_index(name, false) >= 0 || s_count < SIG_MAX - SIG_RESERVED;
+}
+
+void sig_set_num_remote(const char *name, double v)
+{
+    if (remote_may_create(name)) {
+        sig_set_num(name, v, true);
+    }
+}
+
+void sig_set_text_remote(const char *name, const char *text)
+{
+    if (remote_may_create(name)) {
+        sig_set_text(name, text, true);
+    }
 }
 
 static int find_locked(const char *name)

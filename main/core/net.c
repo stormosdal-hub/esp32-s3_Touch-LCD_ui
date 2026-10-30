@@ -188,6 +188,11 @@ esp_err_t net_set_sta(const char *ssid, const char *password, const char *hostna
     return ESP_OK;
 }
 
+const char *net_hostname(void)
+{
+    return s_host;
+}
+
 void net_set_timezone(const char *tz)
 {
     setenv("TZ", (tz && *tz) ? tz : "UTC0", 1);

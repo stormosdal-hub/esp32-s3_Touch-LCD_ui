@@ -75,7 +75,8 @@ static int mb_transact(const uint8_t *req, int reqlen, uint8_t *resp, int maxlen
 
     TickType_t to = pdMS_TO_TICKS(s_cfg.timeout_ms);
     int n = uart_read_bytes(UART_PORT, resp, 3, to);
-    if (n < 3 || resp[0] != req[0]) {
+    if (n < 3 || resp[0] != req[0] || (resp[1] & 0x7F) != req[1]) {
+        uart_flush_input(UART_PORT);
         return -1;
     }
     int total;
@@ -111,6 +112,11 @@ static void mb_poll(int slave, int fn, int reg, const char *fmt, double scale, d
     xSemaphoreGive(s_uart_lock);
 
     if (n < 0) {
+        s_mb_err++;
+        return;
+    }
+    /* the byte count must match what was asked for */
+    if ((fn <= 2 && resp[2] < 1) || (fn > 2 && resp[2] != count * 2)) {
         s_mb_err++;
         return;
     }
@@ -287,7 +293,12 @@ void io_serial_init(void)
 {
     s_uart_lock = xSemaphoreCreateMutex();
     s_txq = xQueueCreate(TXQ_LEN, sizeof(tx_item_t));
-    xTaskCreatePinnedToCore(serial_task, "rs485", 4096, NULL, 4, NULL, 0);
+    xTaskCreatePinnedToCore(serial_task, "rs485", 6144, NULL, 4, NULL, 0);
+}
+
+bool io_serial_running(void)
+{
+    return s_installed;
 }
 
 void io_serial_apply(const cJSON *port)

@@ -53,7 +53,8 @@ const api = {
     return r.json();
   },
   async post(path, body, type = 'application/json') {
-    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': type }, body });
+    // X-LCD-UI: the device refuses state-changing requests without it (CSRF protection)
+    const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': type, 'X-LCD-UI': '1' }, body });
     let j = {};
     try { j = await r.json(); } catch (e) { /* empty body */ }
     if (!r.ok || j.ok === false) throw new Error(j.error || `${r.status} ${r.statusText}`);
@@ -1286,6 +1287,7 @@ function uploadFirmware(file, bar) {
   bar.replaceChildren(h('div', { class: 'progress' }, prog));
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/api/ota');
+  xhr.setRequestHeader('X-LCD-UI', '1');
   xhr.upload.onprogress = e => { if (e.lengthComputable) prog.style.width = (100 * e.loaded / e.total) + '%'; };
   xhr.onload = () => {
     let r = {};

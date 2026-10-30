@@ -230,7 +230,12 @@ Client → device:
 ```
 
 Plain text `name=value` lines also set signals; any other text lands in
-`ws.rx`. Example with Python (`pip install websockets`):
+`ws.rx`. Browser pages from other sites are refused (Origin check); programs
+such as Python scripts or Node-RED connect normally.
+
+Signals created by remote peers (WebSocket, REST, serial `kv`/`json`) are
+limited so they cannot fill the table: of the 512 signal slots, the last 128
+are kept for names used by the layout. Example with Python (`pip install websockets`):
 
 ```python
 import asyncio, json, websockets
@@ -259,6 +264,16 @@ asyncio.run(main())
 | `POST /api/reboot` | Restart |
 | `GET /api/screenshot.bmp` | What the screen shows right now |
 
-Example: `curl -X POST --data-binary @layout.json http://lcd-ui.local/api/layout`
+POST requests must include the header `X-LCD-UI` (any value), for example:
 
-There is no authentication. Keep the device on a trusted network.
+```bash
+curl -X POST -H "X-LCD-UI: 1" --data-binary @layout.json http://lcd-ui.local/api/layout
+```
+
+This, together with checks of the `Host` and `Origin` headers, stops other web
+pages open in your browser from changing the device (cross-site requests and
+DNS rebinding). Address the device by IP address or by its hostname
+(`lcd-ui`, `lcd-ui.local`, `lcd-ui.<anything>`). The API sends no CORS headers,
+so pages served from elsewhere cannot use it from a browser.
+
+There is no password. Keep the device on a trusted network.

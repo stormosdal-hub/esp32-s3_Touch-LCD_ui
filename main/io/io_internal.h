@@ -74,10 +74,13 @@ void io_store_text(const char *mode, const char *signal, const char *text);
 void io_serial_init(void);
 void io_serial_apply(const cJSON *port);
 void io_serial_status(cJSON *obj);
+bool io_serial_running(void);
 
 void io_can_init(void);
 void io_can_apply(const cJSON *port);
 void io_can_status(cJSON *obj);
+bool io_can_running(void);
 
+void io_mqtt_init(void);
 void io_mqtt_apply(const cJSON *port);
 void io_mqtt_status(cJSON *obj);

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "board.h"
+#include "board_config.h"
 #include "driver/gpio.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_heap_caps.h"
@@ -72,19 +73,19 @@ void io_store_text(const char *mode, const char *signal, const char *text)
         while (*val == ' ') {
             val++;
         }
-        sig_set_text(name, val, true);
+        sig_set_text_remote(name, val);
     } else if (!strcmp(mode, "json")) {
-        cJSON *j = cJSON_Parse(text);
+        cJSON *j = util_json_parse(text, strlen(text));
         const cJSON *it;
         cJSON_ArrayForEach(it, j) {
             char name[SIG_NAME_MAX];
             snprintf(name, sizeof(name), "%s%s", signal ? signal : "", it->string ? it->string : "");
             if (cJSON_IsNumber(it)) {
-                sig_set_num(name, it->valuedouble, true);
+                sig_set_num_remote(name, it->valuedouble);
             } else if (cJSON_IsBool(it)) {
-                sig_set_num(name, cJSON_IsTrue(it), true);
+                sig_set_num_remote(name, cJSON_IsTrue(it));
             } else if (cJSON_IsString(it)) {
-                sig_set_text(name, it->valuestring, true);
+                sig_set_text_remote(name, it->valuestring);
             }
         }
         cJSON_Delete(j);
@@ -102,11 +103,19 @@ void io_set_from_text(const char *mode, const char *signal, const char *text)
 
 static bool user_pin(int pin, const char *what)
 {
-    if (board_gpio_is_user(pin)) {
-        return true;
+    if (!board_gpio_is_user(pin)) {
+        ESP_LOGW(TAG, "%s: GPIO%d is used by the board and cannot be used here", what, pin);
+        return false;
     }
-    ESP_LOGW(TAG, "%s: GPIO%d is used by the board and cannot be used here", what, pin);
-    return false;
+    if ((pin == BOARD_RS485_TX || pin == BOARD_RS485_RX) && io_serial_running()) {
+        ESP_LOGW(TAG, "%s: GPIO%d belongs to RS-485; disable RS-485 in Settings to use it", what, pin);
+        return false;
+    }
+    if ((pin == BOARD_CAN_TX || pin == BOARD_CAN_RX) && io_can_running()) {
+        ESP_LOGW(TAG, "%s: GPIO%d belongs to CAN; disable CAN in Settings to use it", what, pin);
+        return false;
+    }
+    return true;
 }
 
 static void parse_common(io_input_t *in, const cJSON *j)
@@ -333,6 +342,7 @@ esp_err_t io_manager_init(void)
     s_cfg_lock = xSemaphoreCreateRecursiveMutex();
     io_serial_init();
     io_can_init();
+    io_mqtt_init();
     xTaskCreatePinnedToCore(poll_task, "io_poll", 4096, NULL, 3, NULL, 0);
     return ESP_OK;
 }
@@ -352,6 +362,10 @@ void io_manager_apply(const cJSON *layout)
     release_inputs(s_inputs, s_count);
     s_inputs = NULL;
     s_count = 0;
+
+    /* Ports before inputs, so input pins can be checked against them. */
+    io_serial_apply(cJSON_GetObjectItem(ports, "rs485"));
+    io_can_apply(cJSON_GetObjectItem(ports, "can"));
 
     int n = cJSON_GetArraySize(list);
     if (n > IO_MAX_INPUTS) {
@@ -377,8 +391,6 @@ void io_manager_apply(const cJSON *layout)
     }
     ESP_LOGI(TAG, "%d inputs active", s_count);
 
-    io_serial_apply(cJSON_GetObjectItem(ports, "rs485"));
-    io_can_apply(cJSON_GetObjectItem(ports, "can"));
     io_cfg_unlock();
     /* Outside the lock: stopping the MQTT client waits for its task, which may need the lock. */
     io_mqtt_apply(cJSON_GetObjectItem(ports, "mqtt"));

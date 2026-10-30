@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include "app.h"
 #include "board.h"
 #include "board_config.h"
@@ -54,12 +55,69 @@ static const static_file_t s_files[] = {
 
 /* ---------- Helpers ---------- */
 
-static void cors(httpd_req_t *req)
+/* Copy a request header; empty string if missing. */
+static void get_hdr(httpd_req_t *req, const char *name, char *buf, size_t len)
 {
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    buf[0] = '\0';
+    if (httpd_req_get_hdr_value_len(req, name) < len) {
+        httpd_req_get_hdr_value_str(req, name, buf, len);
+    }
 }
+
+/* Host part of "host:port" or "scheme://host:port/..." */
+static void host_part(const char *in, char *out, size_t len)
+{
+    const char *p = strstr(in, "://");
+    p = p ? p + 3 : in;
+    size_t n = (*p == '[') ? strcspn(p, "]") + 1 : strcspn(p, ":/");
+    if (n >= len) {
+        n = len - 1;
+    }
+    memcpy(out, p, n);
+    out[n] = '\0';
+}
+
+/*
+ * Protect against other web pages in the user's browser driving the device:
+ * - Host must be an IP address or our hostname (blocks DNS rebinding),
+ * - a browser Origin, if sent, must be this device,
+ * - state-changing requests must carry "X-LCD-UI", which cross-site pages
+ *   cannot add without a CORS preflight that we never approve.
+ * Scripts and tools (curl, Python) just add the header.
+ */
+static bool request_allowed(httpd_req_t *req, bool mutating)
+{
+    char hdr[96], host[64], origin[64];
+    get_hdr(req, "Host", hdr, sizeof(hdr));
+    host_part(hdr, host, sizeof(host));
+    const char *name = net_hostname();
+    size_t nl = strlen(name);
+    bool ip = host[0] == '[' || (host[0] && strspn(host, "0123456789.") == strlen(host));
+    bool ours = !strncasecmp(host, name, nl) && (host[nl] == '\0' || host[nl] == '.');
+    if (host[0] && !ip && !ours) {
+        ESP_LOGW(TAG, "rejected request for host '%s'", host);
+        return false;
+    }
+    get_hdr(req, "Origin", hdr, sizeof(hdr));
+    if (hdr[0]) {
+        host_part(hdr, origin, sizeof(origin));
+        if (strcasecmp(origin, host)) {
+            ESP_LOGW(TAG, "rejected cross-origin request from '%s'", hdr);
+            return false;
+        }
+    }
+    if (mutating && httpd_req_get_hdr_value_len(req, "X-LCD-UI") == 0) {
+        return false;
+    }
+    return true;
+}
+
+#define CHECK_REQUEST(req, mutating) do { \
+        if (!request_allowed(req, mutating)) { \
+            httpd_resp_set_status(req, "403 Forbidden"); \
+            return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"request blocked (missing X-LCD-UI header or foreign origin)\"}"); \
+        } \
+    } while (0)
 
 static esp_err_t send_json(httpd_req_t *req, cJSON *obj)
 {
@@ -68,7 +126,6 @@ static esp_err_t send_json(httpd_req_t *req, cJSON *obj)
     if (!s) {
         return httpd_resp_send_500(req);
     }
-    cors(req);
     httpd_resp_set_type(req, "application/json");
     esp_err_t r = httpd_resp_sendstr(req, s);
     cJSON_free(s);
@@ -148,9 +205,9 @@ static esp_err_t static_handler(httpd_req_t *req)
 
 static esp_err_t layout_get(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, false);
     size_t len = 0;
     char *data = storage_read(APP_LAYOUT_PATH, &len);
-    cors(req);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     esp_err_t r;
@@ -165,13 +222,14 @@ static esp_err_t layout_get(httpd_req_t *req)
 
 static esp_err_t layout_default_get(httpd_req_t *req)
 {
-    cors(req);
+    CHECK_REQUEST(req, false);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, app_default_layout());
 }
 
 static esp_err_t layout_post(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, true);
     size_t len;
     char *body = read_body(req, APP_MAX_LAYOUT, &len);
     if (!body) {
@@ -185,6 +243,7 @@ static esp_err_t layout_post(httpd_req_t *req)
 
 static esp_err_t rollback_post(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, true);
     char err[128] = "";
     esp_err_t r = app_rollback(err, sizeof(err));
     return send_result(req, r == ESP_OK, err);
@@ -194,6 +253,7 @@ static esp_err_t rollback_post(httpd_req_t *req)
 
 static esp_err_t info_get(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, false);
     cJSON *o = cJSON_CreateObject();
     const esp_app_desc_t *app = esp_app_get_description();
     cJSON_AddStringToObject(o, "project", app->project_name);
@@ -212,6 +272,8 @@ static esp_err_t info_get(httpd_req_t *req)
     }
     const esp_partition_t *running = esp_ota_get_running_partition();
     cJSON_AddStringToObject(o, "partition", running ? running->label : "?");
+    cJSON_AddNumberToObject(o, "signals", sig_count());
+    cJSON_AddNumberToObject(o, "signals_max", SIG_MAX);
     net_info_json(o);
     storage_info_json(o);
     io_status_json(o);
@@ -220,6 +282,7 @@ static esp_err_t info_get(httpd_req_t *req)
 
 static esp_err_t signals_get(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, false);
     cJSON *o = cJSON_CreateObject();
     sig_to_json(o);
     return send_json(req, o);
@@ -233,20 +296,21 @@ static void set_signals_from_json(const cJSON *obj)
             continue;
         }
         if (cJSON_IsNumber(it)) {
-            sig_set_num(it->string, it->valuedouble, true);
+            sig_set_num_remote(it->string, it->valuedouble);
         } else if (cJSON_IsBool(it)) {
-            sig_set_num(it->string, cJSON_IsTrue(it), true);
+            sig_set_num_remote(it->string, cJSON_IsTrue(it));
         } else if (cJSON_IsString(it)) {
-            sig_set_text(it->string, it->valuestring, true);
+            sig_set_text_remote(it->string, it->valuestring);
         }
     }
 }
 
 static esp_err_t signals_post(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, true);
     size_t len;
     char *body = read_body(req, 16 * 1024, &len);
-    cJSON *j = body ? cJSON_Parse(body) : NULL;
+    cJSON *j = body ? util_json_parse(body, len) : NULL;
     free(body);
     if (!cJSON_IsObject(j)) {
         cJSON_Delete(j);
@@ -261,6 +325,7 @@ static esp_err_t signals_post(httpd_req_t *req)
 
 static esp_err_t wifi_scan_get(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, false);
     cJSON *arr = cJSON_CreateArray();
     net_scan_json(arr);
     return send_json(req, arr);
@@ -268,9 +333,10 @@ static esp_err_t wifi_scan_get(httpd_req_t *req)
 
 static esp_err_t wifi_post(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, true);
     size_t len;
     char *body = read_body(req, 1024, &len);
-    cJSON *j = body ? cJSON_Parse(body) : NULL;
+    cJSON *j = body ? util_json_parse(body, len) : NULL;
     free(body);
     const char *ssid = json_str(j, "ssid", NULL);
     esp_err_t r = ESP_ERR_INVALID_ARG;
@@ -285,6 +351,7 @@ static esp_err_t wifi_post(httpd_req_t *req)
 
 static esp_err_t reboot_post(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, true);
     send_result(req, true, NULL);
     restart_later();
     return ESP_OK;
@@ -292,6 +359,7 @@ static esp_err_t reboot_post(httpd_req_t *req)
 
 static esp_err_t ota_post(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, true);
     const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
     if (!part) {
         return send_result(req, false, "no OTA partition");
@@ -333,6 +401,7 @@ static esp_err_t ota_post(httpd_req_t *req)
 /* Screenshot as a 16-bit RGB565 BMP (top-down). */
 static esp_err_t screenshot_get(httpd_req_t *req)
 {
+    CHECK_REQUEST(req, false);
     lvgl_port_lock(0);
     lv_draw_buf_t *snap = lv_snapshot_take(lv_screen_active(), LV_COLOR_FORMAT_RGB565);
     lvgl_port_unlock();
@@ -361,7 +430,6 @@ static esp_err_t screenshot_get(httpd_req_t *req)
     #undef PUT32
 
     httpd_resp_set_type(req, "image/bmp");
-    cors(req);
     esp_err_t r = httpd_resp_send_chunk(req, (const char *)hdr, sizeof(hdr));
     for (uint32_t y = 0; r == ESP_OK && y < h; ) {
         uint32_t rows = 1;
@@ -376,13 +444,6 @@ static esp_err_t screenshot_get(httpd_req_t *req)
     }
     lv_draw_buf_destroy(snap);
     return r;
-}
-
-static esp_err_t options_handler(httpd_req_t *req)
-{
-    cors(req);
-    httpd_resp_set_status(req, "204 No Content");
-    return httpd_resp_send(req, NULL, 0);
 }
 
 /* ---------- WebSocket ---------- */
@@ -402,7 +463,9 @@ static void ws_send_work(void *arg)
         .len = strlen(job->msg),
     };
     if (job->fd >= 0) {
-        httpd_ws_send_frame_async(s_server, job->fd, &f);
+        if (httpd_ws_send_frame_async(s_server, job->fd, &f) != ESP_OK) {
+            httpd_sess_trigger_close(s_server, job->fd);
+        }
     } else {
         size_t n = MAX_CLIENTS;
         int fds[MAX_CLIENTS];
@@ -411,7 +474,11 @@ static void ws_send_work(void *arg)
             for (size_t i = 0; i < n; i++) {
                 if (httpd_ws_get_fd_info(s_server, fds[i]) == HTTPD_WS_CLIENT_WEBSOCKET) {
                     any = true;
-                    httpd_ws_send_frame_async(s_server, fds[i], &f);
+                    /* a client that cannot keep up would stall the server for everyone */
+                    if (httpd_ws_send_frame_async(s_server, fds[i], &f) != ESP_OK) {
+                        ESP_LOGW(TAG, "dropping slow WebSocket client %d", fds[i]);
+                        httpd_sess_trigger_close(s_server, fds[i]);
+                    }
                 }
             }
         }
@@ -460,7 +527,7 @@ static void ws_send_snapshot(int fd)
 
 static void ws_handle_text(int fd, char *text)
 {
-    cJSON *j = cJSON_Parse(text);
+    cJSON *j = util_json_parse(text, strlen(text));
     if (!cJSON_IsObject(j)) {
         /* Plain text: "name=value" lines set signals; the raw text goes to ws.rx */
         cJSON_Delete(j);
@@ -511,6 +578,9 @@ static void ws_handle_text(int fd, char *text)
 static esp_err_t ws_handler(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
+        if (!request_allowed(req, false)) {
+            return ESP_FAIL;    /* closes the connection */
+        }
         s_have_ws = true;
         ws_send_snapshot(httpd_req_to_sockfd(req));
         return ESP_OK;
@@ -520,15 +590,16 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (r != ESP_OK || f.len > MAX_WS_FRAME) {
         return ESP_FAIL;
     }
-    if (f.type != HTTPD_WS_TYPE_TEXT || f.len == 0) {
+    if (f.len == 0) {
         return ESP_OK;
     }
+    /* read the payload even if we ignore the frame, or the stream gets out of step */
     f.payload = malloc(f.len + 1);
     if (!f.payload) {
         return ESP_ERR_NO_MEM;
     }
     r = httpd_ws_recv_frame(req, &f, f.len);
-    if (r == ESP_OK) {
+    if (r == ESP_OK && f.type == HTTPD_WS_TYPE_TEXT) {
         f.payload[f.len] = '\0';
         ws_handle_text(httpd_req_to_sockfd(req), (char *)f.payload);
     }
@@ -548,7 +619,7 @@ esp_err_t web_server_start(void)
     cfg.uri_match_fn = httpd_uri_match_wildcard;
     cfg.core_id = 0;
     cfg.recv_wait_timeout = 10;
-    cfg.send_wait_timeout = 10;
+    cfg.send_wait_timeout = 5;
     esp_err_t err = httpd_start(&s_server, &cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
@@ -569,7 +640,6 @@ esp_err_t web_server_start(void)
         { .uri = "/api/reboot", .method = HTTP_POST, .handler = reboot_post },
         { .uri = "/api/ota", .method = HTTP_POST, .handler = ota_post },
         { .uri = "/api/screenshot.bmp", .method = HTTP_GET, .handler = screenshot_get },
-        { .uri = "/api/*", .method = HTTP_OPTIONS, .handler = options_handler },
         { .uri = "/*", .method = HTTP_GET, .handler = static_handler },
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
