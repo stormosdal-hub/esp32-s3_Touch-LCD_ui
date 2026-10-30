@@ -1193,7 +1193,7 @@ function refreshMonitor() {
     if (!table) { renderPanel(); return; }
     for (const n of Object.keys(state.signals)) {
       let row = table.querySelector(`tr[data-sig="${CSS.escape(n)}"]`);
-      if (!row) { renderPanel(); return; }
+      if (!row) { row = monitorRow(n); table.append(row); }
       const v = state.signals[n];
       row.querySelector('.v').textContent = typeof v === 'number' ? numToStr(v) : String(v);
     }
